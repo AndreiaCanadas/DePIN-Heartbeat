@@ -1,22 +1,20 @@
 /*****************************************************************************************
- * ESP32 DePIN Template
+ * ESP32 Heart Rate DePIN
  * 
- * A clean template for ESP32 + Solana blockchain integration
+ * Decentralized Physical Infrastructure Network (DePIN) device that monitors heart rate
+ * and logs data to the Solana blockchain. Earns tokens for contributing health data.
  * 
  * Features:
- * - WiFi connection management
- * - Solana wallet integration with IoTxChain library
- * - LED status indicators (built-in + RGB)
- * - Balance checking functionality
- * - Example transaction function
- * 
- * Setup:
- * 1. Configure credentials in include/credentials.h
- * 2. Add your custom sensors/functionality
- * 3. Extend the main loop and functions as needed
+ * - Real-time heart rate monitoring with KY039 sensor
+ * - WiFi connectivity and Solana blockchain integration
+ * - Automated data logging to Solana every 6 seconds
+ * - LED status indicators for monitoring system state
+ * - SPL token rewards for data contribution
  * 
  *****************************************************************************************/
 
+#include "USBCDC.h"
+#include "WString.h"
 #include "esp32-hal-gpio.h"
 #include "pins_arduino.h"
 #include <Arduino.h>
@@ -40,21 +38,50 @@ unsigned long lastBlinkTime = 0;
 uint8_t ledOn = 0;
 int ledStatus = LOW;
 
+// Heart Rate Sensor KY039
+#define HEART_RATE_SENSOR_PIN A0
+#define HEART_RATE_SAMPLE_SIZE 20
+float heartRate = 0;
+float heartRateAverage = 0;
+bool heartRateHeaderPrinted = false;
+int heartRateCount = 0;
+#define HEART_RATE_TIME_MS 50
+unsigned long lastHeartRateTime = 0;
+#define HEART_RATE_SEND_TIME_MS 6000
+unsigned long lastHeartRateSendTime = 0;
+
+
 // Solana Configuration : see credentials.h
 // Initialize Solana Library
 IoTxChain solana(SOLANA_RPC_URL);
 Pubkey TOKEN_PROGRAM_ID = Pubkey::fromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 Pubkey SYSTEM_PROGRAM_ID = Pubkey::fromBase58("11111111111111111111111111111111");
 
+// Solana Accounts
+Pubkey owner;
+Keypair signer;
+Pubkey mint;
+std::vector<uint8_t> programId;
+Pubkey accountPdaPubkey;
+Pubkey mintAuthorityPdaPubkey;
+Pubkey tokenAccount;
+String tokenAccountAddress;
+// prepare solana accounts
+const int maxAttempts = 3;
+int attempt = 0;
+bool pdaSuccess = false;
+
 /*****************************************************************************************
 * Function Declarations
 *****************************************************************************************/ 
 void connectToWiFi();
 void blinkRgbLed();
+void readHeartRate();
 void printSplTokenBalance();
-bool sendHeartRateReading(float heartRate);
-
-
+bool prepareSolanaAccounts();
+void printSolanaAccounts();
+String vectorToHex(const std::vector<uint8_t>& data);
+void sendHeartRateReading(float heartRate);
 
 /*****************************************************************************************
 * Function: Initial Setup
@@ -73,13 +100,31 @@ void setup() {
   pinMode(LED_BLUE, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_RED, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);
-  digitalWrite(LED_BLUE, LOW);
-  digitalWrite(LED_GREEN, LOW);
-  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BUILTIN, HIGH);
+  digitalWrite(LED_BLUE, HIGH);
+  digitalWrite(LED_GREEN, HIGH);
+  digitalWrite(LED_RED, HIGH);
+
+  // initialize heart rate sensor
+  pinMode(HEART_RATE_SENSOR_PIN, INPUT);
   
   // connect to WiFi
   connectToWiFi();
+  
+  while (!pdaSuccess && attempt < maxAttempts) {
+    pdaSuccess = prepareSolanaAccounts();
+    if (!pdaSuccess) {
+      Serial.println("⏳ Retrying PDA calculation... (Attempt " + String(attempt + 1) + "/" + String(maxAttempts) + ")");
+      delay(1000);
+      attempt++;
+    }
+  }
+  
+  if (pdaSuccess) {
+    printSolanaAccounts();
+  } else {
+    Serial.println("❌ Failed to calculate PDAs");
+  }
 
   // print SPL token balance of user
   printSplTokenBalance();
@@ -92,30 +137,55 @@ void setup() {
 void loop() {
   timeMs = millis();
 
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_RED, HIGH);
+  digitalWrite(LED_BLUE, HIGH);
+
   // blink LED
   if (timeMs - lastBlinkTime > BLINK_TIME_MS) {
+    lastBlinkTime = timeMs;
     // Option 1: Simple built-in LED toggle
     ledStatus = !ledStatus;
     digitalWrite(LED_BUILTIN, ledStatus);
-
     // Option 2: RGB LED cycling
-    blinkRgbLed();
-
-    lastBlinkTime = timeMs;
-
-    // send heart rate reading
-    if (sendHeartRateReading(100.0)) {
-      printSplTokenBalance();
-      //Serial.println("✅ Heart rate reading sent successfully");
-    } else {
-      //Serial.println("❌ Failed to send heart rate reading");
-    }
-
+    //blinkRgbLed();
   }
 
+  // capture heart rate
+  if (timeMs - lastHeartRateTime > HEART_RATE_TIME_MS) {
+    digitalWrite(LED_RED, LOW);
+    digitalWrite(LED_GREEN, HIGH);
+    digitalWrite(LED_BLUE, HIGH);
+    lastHeartRateTime = timeMs;
+    readHeartRate();
+    heartRateAverage = (heartRateAverage + heartRate) / 2;
+    
+    // Print header once
+    if (!heartRateHeaderPrinted) {
+      Serial.println("\n== ❤️  Heart Rate ❤️  ==");
+      heartRateHeaderPrinted = true;
+    }
+    
+    // Add current reading
+    Serial.print(String((int)heartRateAverage) + " ... ");
+    heartRateCount++;
+    if (heartRateCount >= 6) {
+      Serial.print("\n");
+      heartRateCount = 0;
+    }
+  }
 
+  // send heart rate reading
+  if ((timeMs - lastHeartRateSendTime > HEART_RATE_SEND_TIME_MS) && pdaSuccess) {
+    heartRateHeaderPrinted = false;
+    digitalWrite(LED_GREEN, HIGH);
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_BLUE, LOW);
+    lastHeartRateSendTime = timeMs;
+    sendHeartRateReading(heartRateAverage);
+    Serial.print("Time to send transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
+  }
 
-  
 }
 
 /*****************************************************************************************
@@ -132,19 +202,19 @@ void loop() {
 void blinkRgbLed() {
 
   if (ledOn == 0) { // turn on LED_BLUE
-    digitalWrite(LED_BLUE, HIGH);
-    digitalWrite(LED_GREEN, LOW);
-    digitalWrite(LED_RED, LOW);
-    ledOn = 1;
-  } else if (ledOn == 1) { // turn on LED_GREEN
     digitalWrite(LED_BLUE, LOW);
     digitalWrite(LED_GREEN, HIGH);
-    digitalWrite(LED_RED, LOW);
-    ledOn = 2;
-  } else if (ledOn == 2) { // turn on LED_RED
-    digitalWrite(LED_BLUE, LOW);
+    digitalWrite(LED_RED, HIGH);
+    ledOn = 1;
+  } else if (ledOn == 1) { // turn on LED_GREEN
+    digitalWrite(LED_BLUE, HIGH);
     digitalWrite(LED_GREEN, LOW);
     digitalWrite(LED_RED, HIGH);
+    ledOn = 2;
+  } else if (ledOn == 2) { // turn on LED_RED
+    digitalWrite(LED_BLUE, HIGH);
+    digitalWrite(LED_GREEN, HIGH);
+    digitalWrite(LED_RED, LOW);
     ledOn = 0;
   }
   
@@ -179,6 +249,22 @@ void connectToWiFi() {
 }
 
 /*****************************************************************************************
+* Function: Read Heart Rate
+*
+* Description: Reads the heart rate from the heart rate sensor and calculates the average
+* Parameters: None
+* Returns: None
+*****************************************************************************************/ 
+void readHeartRate() {
+  float sum = 0;
+  for (int i = 0; i < HEART_RATE_SAMPLE_SIZE; i++) {
+    sum += analogRead(HEART_RATE_SENSOR_PIN);
+  }
+  heartRate = sum / HEART_RATE_SAMPLE_SIZE;
+}
+
+
+/*****************************************************************************************
 * Function: Get SPL token balance
 *
 * Description: Gets the SPL token balance of a wallet address and prints it to the serial monitor
@@ -197,26 +283,25 @@ void printSplTokenBalance() {
   } else {
       Serial.println("Failed to get SPL token balance.");
   }
+  Serial.print("\n");
 }
 
 /*****************************************************************************************
-* Function: Send Heart Rate Reading
+* Function: Prepare Solana Accounts
 *
-* Description: 
+* Description: Prepares the Solana accounts and PDAs
 * Parameters: None
-* Returns: bool - True if transaction is successful, false otherwise
+* Returns: None
 *****************************************************************************************/ 
-bool sendHeartRateReading(float heartRate) {
-
-  Serial.println("\n=== Sending Heart Rate Reading ===");
+bool prepareSolanaAccounts(){
 
   // Prepare accounts and signer
-  Pubkey owner = Pubkey::fromBase58(PUBLIC_KEY);
-  Keypair signer = Keypair::fromPrivateKey(PRIVATE_KEY);
-  Pubkey mint = Pubkey::fromBase58(TOKEN_MINT);
+  owner = Pubkey::fromBase58(PUBLIC_KEY);
+  signer = Keypair::fromPrivateKey(PRIVATE_KEY);
+  mint = Pubkey::fromBase58(TOKEN_MINT);
   
   // Prepare program ID
-  std::vector<uint8_t> programId = base58ToPubkey(PROGRAM_ID);
+  programId = base58ToPubkey(PROGRAM_ID);
 
   // Find Heartbeat Account PDA
   std::vector<uint8_t> accountPda;
@@ -227,10 +312,9 @@ bool sendHeartRateReading(float heartRate) {
   };
   uint8_t bump;
   if (!solana.findProgramAddress(seeds, programId, accountPda, bump)) {
-    Serial.println("❌ Failed to find program address for Heartbeat Account!");
-    return false;
+      Serial.println("❌ Failed to find Heartbeat Account PDA.");
+      return false;
   }
-  Pubkey accountPdaPubkey;
   accountPdaPubkey.data = accountPda;
 
   // Find Mint Authority PDA
@@ -244,18 +328,63 @@ bool sendHeartRateReading(float heartRate) {
     Serial.println("❌ Failed to find program address for Mint Authority!");
     return false;
   }
-  Pubkey mintAuthorityPdaPubkey;
   mintAuthorityPdaPubkey.data = mintAuthorityPda;
 
   // Find Associated Token Account
-  String ata;
-  if (solana.findAssociatedTokenAccount(PUBLIC_KEY, TOKEN_MINT, ata)) {
-      Serial.print("Associated Token Account: ");
-      Serial.println(ata);
-  } else {
+  if (!solana.findAssociatedTokenAccount(PUBLIC_KEY, TOKEN_MINT, tokenAccountAddress)) {
       Serial.println("❌ Failed to find ATA.");
+      return false;
   }
-  Pubkey tokenAccount = Pubkey::fromBase58(ata);
+  tokenAccount = Pubkey::fromBase58(tokenAccountAddress);
+
+  return true;
+
+}
+
+/*****************************************************************************************
+* Function: Convert vector to Hex
+*
+* Description: Auxiliary function to convert std::vector<uint8_t> to hex string  
+* Parameters: data - vector of bytes to convert
+* Returns: String - hex encoded string
+*****************************************************************************************/ 
+String vectorToHex(const std::vector<uint8_t>& data) {
+  String result = "";
+  for (int i = 0; i < data.size(); i++) {
+    if (data[i] < 16) result += "0";
+    result += String(data[i], HEX);
+  }
+  return result;
+}
+
+/*****************************************************************************************
+* Function: Print Solana Accounts
+*
+* Description: Prints all Solana account addresses
+* Parameters: None
+* Returns: None
+*****************************************************************************************/ 
+void printSolanaAccounts() {
+  Serial.println("\n=== Heartbeat Account PDA ===");
+  Serial.println(vectorToHex(accountPdaPubkey.data));
+  
+  Serial.println("\n=== Mint Authority PDA ===");
+  Serial.println(vectorToHex(mintAuthorityPdaPubkey.data));
+  
+  Serial.println("\n=== Associated Token Account ===");
+  Serial.println(tokenAccountAddress);
+}
+
+/*****************************************************************************************
+* Function: Send Heart Rate Reading
+*
+* Description: 
+* Parameters: None
+* Returns: bool - True if transaction is successful, false otherwise
+*****************************************************************************************/ 
+void sendHeartRateReading(float heartRate) {
+
+  Serial.println("\n=== Sending Heart Rate Reading ===");
 
   // Prepare instruction
   std::vector<uint8_t> discriminator = solana.calculateDiscriminator("log_heartbeat");
@@ -285,7 +414,7 @@ bool sendHeartRateReading(float heartRate) {
     tx.recent_blockhash = solana.getLatestBlockhash();
     if (tx.recent_blockhash.isEmpty()) {
         Serial.println("❌ Failed to get blockhash!");
-        return false;
+        return;
     }
     tx.add(ix);
     tx.sign({signer});
@@ -298,5 +427,4 @@ bool sendHeartRateReading(float heartRate) {
         Serial.println("❌ Anchor tx failed.");
     }
 
-  return true;
 }
