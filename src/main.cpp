@@ -43,13 +43,17 @@ int ledStatus = LOW;
 // Solana Configuration : see credentials.h
 // Initialize Solana Library
 IoTxChain solana(SOLANA_RPC_URL);
+Pubkey TOKEN_PROGRAM_ID = Pubkey::fromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+Pubkey SYSTEM_PROGRAM_ID = Pubkey::fromBase58("11111111111111111111111111111111");
 
 /*****************************************************************************************
 * Function Declarations
 *****************************************************************************************/ 
 void connectToWiFi();
 void blinkRgbLed();
-void getSolanaBalance(const char* publicKey);
+void printSplTokenBalance();
+bool sendHeartRateReading(float heartRate);
+
 
 
 /*****************************************************************************************
@@ -77,8 +81,8 @@ void setup() {
   // connect to WiFi
   connectToWiFi();
 
-  // get Solana balance
-  getSolanaBalance(PUBLIC_KEY);
+  // print SPL token balance of user
+  printSplTokenBalance();
 
 }
 
@@ -93,12 +97,23 @@ void loop() {
     // Option 1: Simple built-in LED toggle
     ledStatus = !ledStatus;
     digitalWrite(LED_BUILTIN, ledStatus);
-    
+
     // Option 2: RGB LED cycling
     blinkRgbLed();
-    
+
     lastBlinkTime = timeMs;
+
+    // send heart rate reading
+    if (sendHeartRateReading(100.0)) {
+      printSplTokenBalance();
+      //Serial.println("✅ Heart rate reading sent successfully");
+    } else {
+      //Serial.println("❌ Failed to send heart rate reading");
+    }
+
   }
+
+
 
   
 }
@@ -164,29 +179,124 @@ void connectToWiFi() {
 }
 
 /*****************************************************************************************
-* Function: Get Solana balance
+* Function: Get SPL token balance
 *
-* Description: Gets the Solana balance of a wallet address and prints it to the serial monitor
-* Parameters: 
-*   publicKey - Wallet public key to get the balance of
+* Description: Gets the SPL token balance of a wallet address and prints it to the serial monitor
+* Parameters: None
 * Returns: None
 *****************************************************************************************/ 
-void getSolanaBalance(const char* publicKey) {
+void printSplTokenBalance() {
+  Serial.println("\n=== User SPL Token Balance ===");
 
-  Serial.println("\nGetting Solana balance...");
+  uint64_t rawBalance = 0;
 
-  uint64_t lamports = 0;
-  if (solana.getSolBalance(publicKey, lamports)) {
-    Serial.print("SOL Balance (SOL): ");
-    Serial.println((float)lamports / 1e9, 9);
-    Serial.println();
+  if (solana.getSplTokenBalance(PUBLIC_KEY, TOKEN_MINT, rawBalance)) {
+      float readableBalance = (float)rawBalance / 1e9;
+      Serial.print("Token Balance: ");
+      Serial.println(readableBalance, 8);
   } else {
-    Serial.println("Failed to get Solana balance\n");
+      Serial.println("Failed to get SPL token balance.");
   }
-
 }
 
 /*****************************************************************************************
-* Add Your Custom Functions Here
+* Function: Send Heart Rate Reading
+*
+* Description: 
+* Parameters: None
+* Returns: bool - True if transaction is successful, false otherwise
 *****************************************************************************************/ 
+bool sendHeartRateReading(float heartRate) {
 
+  Serial.println("\n=== Sending Heart Rate Reading ===");
+
+  // Prepare accounts and signer
+  Pubkey owner = Pubkey::fromBase58(PUBLIC_KEY);
+  Keypair signer = Keypair::fromPrivateKey(PRIVATE_KEY);
+  Pubkey mint = Pubkey::fromBase58(TOKEN_MINT);
+  
+  // Prepare program ID
+  std::vector<uint8_t> programId = base58ToPubkey(PROGRAM_ID);
+
+  // Find Heartbeat Account PDA
+  std::vector<uint8_t> accountPda;
+  // Prepare seeds: 
+  std::vector<std::vector<uint8_t>> seeds = {
+    {'h','e','a','r','t','b','e','a','t'},
+    base58ToPubkey(PUBLIC_KEY)
+  };
+  uint8_t bump;
+  if (!solana.findProgramAddress(seeds, programId, accountPda, bump)) {
+    Serial.println("❌ Failed to find program address for Heartbeat Account!");
+    return false;
+  }
+  Pubkey accountPdaPubkey;
+  accountPdaPubkey.data = accountPda;
+
+  // Find Mint Authority PDA
+  std::vector<uint8_t> mintAuthorityPda;
+  // Prepare seeds: 
+  std::vector<std::vector<uint8_t>> seeds2 = {
+    {'a','u','t','h','o','r','i','t','y'}
+  };
+  uint8_t bump2;
+  if (!solana.findProgramAddress(seeds2, programId, mintAuthorityPda, bump2)) {
+    Serial.println("❌ Failed to find program address for Mint Authority!");
+    return false;
+  }
+  Pubkey mintAuthorityPdaPubkey;
+  mintAuthorityPdaPubkey.data = mintAuthorityPda;
+
+  // Find Associated Token Account
+  String ata;
+  if (solana.findAssociatedTokenAccount(PUBLIC_KEY, TOKEN_MINT, ata)) {
+      Serial.print("Associated Token Account: ");
+      Serial.println(ata);
+  } else {
+      Serial.println("❌ Failed to find ATA.");
+  }
+  Pubkey tokenAccount = Pubkey::fromBase58(ata);
+
+  // Prepare instruction
+  std::vector<uint8_t> discriminator = solana.calculateDiscriminator("log_heartbeat");
+  std::vector<uint8_t> data = discriminator;
+
+  // Prepare payload (heart rate as float32 little-endian)
+  std::vector<uint8_t> payload(4);
+  memcpy(payload.data(), &heartRate, sizeof(float));
+  data.insert(data.end(), payload.begin(), payload.end());
+
+  Instruction ix(
+    Pubkey{programId},
+    std::vector<AccountMeta>{
+      AccountMeta::signer(owner),
+      AccountMeta::writable(accountPdaPubkey, false),
+      AccountMeta{mintAuthorityPdaPubkey, false, false},
+      AccountMeta::writable(mint, false),
+      AccountMeta::writable(tokenAccount, false),
+      AccountMeta{TOKEN_PROGRAM_ID, false, false},   // Token Program
+      AccountMeta{SYSTEM_PROGRAM_ID, false, false}   // System Program
+    },
+    data
+  );
+
+  Transaction tx;
+    tx.fee_payer = owner;
+    tx.recent_blockhash = solana.getLatestBlockhash();
+    if (tx.recent_blockhash.isEmpty()) {
+        Serial.println("❌ Failed to get blockhash!");
+        return false;
+    }
+    tx.add(ix);
+    tx.sign({signer});
+    String txBase64 = tx.serializeBase64();
+
+    String txSig;
+    if (solana.sendRawTransaction(txBase64, txSig)) {
+        Serial.println("✅ Anchor tx sent! Signature: " + txSig);
+    } else {
+        Serial.println("❌ Anchor tx failed.");
+    }
+
+  return true;
+}
