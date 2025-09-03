@@ -44,11 +44,11 @@ int ledStatus = LOW;
 float heartRate = 0;
 float heartRateAverage = 0;
 bool heartRateHeaderPrinted = false;
-int heartRateCount = 0;
-#define HEART_RATE_TIME_MS 50
+#define HEART_RATE_TIME_MS 500
 unsigned long lastHeartRateTime = 0;
-#define HEART_RATE_SEND_TIME_MS 6000
+#define HEART_RATE_SEND_TIME_MS 60000
 unsigned long lastHeartRateSendTime = 0;
+int heartRateCount = 0;
 
 
 // Solana Configuration : see credentials.h
@@ -81,6 +81,7 @@ void printSplTokenBalance();
 bool prepareSolanaAccounts();
 void printSolanaAccounts();
 String vectorToHex(const std::vector<uint8_t>& data);
+String generateHeartbeatPattern(float heartRate);
 void sendHeartRateReading(float heartRate);
 
 /*****************************************************************************************
@@ -114,7 +115,6 @@ void setup() {
   while (!pdaSuccess && attempt < maxAttempts) {
     pdaSuccess = prepareSolanaAccounts();
     if (!pdaSuccess) {
-      Serial.println("⏳ Retrying PDA calculation... (Attempt " + String(attempt + 1) + "/" + String(maxAttempts) + ")");
       delay(1000);
       attempt++;
     }
@@ -162,16 +162,18 @@ void loop() {
     
     // Print header once
     if (!heartRateHeaderPrinted) {
-      Serial.println("\n== ❤️  Heart Rate ❤️  ==");
+      Serial.println("\n== ❤️  Heart Rate Monitor ❤️  ==");
+      Serial.println(); // Blank line after header
       heartRateHeaderPrinted = true;
     }
-    
-    // Add current reading
-    Serial.print(String((int)heartRateAverage) + " ... ");
+
+    // Add current reading with heartbeat pattern
+    String pattern = generateHeartbeatPattern(heartRateAverage);
+    Serial.print(pattern + " ");
     heartRateCount++;
-    if (heartRateCount >= 6) {
-      Serial.print("\n");
+    if (heartRateCount >= 6) {  // Show 4 patterns per line for better visibility
       heartRateCount = 0;
+      Serial.print("\r");
     }
   }
 
@@ -183,7 +185,7 @@ void loop() {
     digitalWrite(LED_BLUE, LOW);
     lastHeartRateSendTime = timeMs;
     sendHeartRateReading(heartRateAverage);
-    Serial.print("Time to send transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
+    Serial.println("\nTime to send transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
   }
 
 }
@@ -373,6 +375,28 @@ void printSolanaAccounts() {
   
   Serial.println("\n=== Associated Token Account ===");
   Serial.println(tokenAccountAddress);
+}
+
+/*****************************************************************************************
+* Function: Generate Heartbeat Pattern
+*
+* Description: Creates visual heartbeat pattern based on heart rate value
+* Parameters: heartRate - current heart rate reading
+* Returns: String - visual pattern representing heartbeat intensity
+*****************************************************************************************/ 
+String generateHeartbeatPattern(float heartRate) {
+  int bpm = (int)heartRate;
+  
+  // Different patterns based on heart rate ranges
+  if (heartRate < 70) {
+    return String(bpm) + " __/\\^/\\__";
+  } else if (heartRate < 100) {
+    return String(bpm) + " _/\\^^/\\_";
+  } else if (heartRate < 130) {
+    return String(bpm) + " /\\^^^^\\/\\";
+  } else {
+    return String(bpm) + " /\\^^^^^/\\";
+  }
 }
 
 /*****************************************************************************************
