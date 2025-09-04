@@ -19,6 +19,9 @@
 #include "pins_arduino.h"
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include "IoTxChain-lib.h"
 #include "credentials.h"
 
@@ -50,6 +53,14 @@ unsigned long lastHeartRateTime = 0;
 unsigned long lastHeartRateSendTime = 0;
 int heartRateCount = 0;
 
+// OLED Display Configuration
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+#define OLED_SDA A4
+#define OLED_SCL A5
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Solana Configuration : see credentials.h
 // Initialize Solana Library
@@ -82,7 +93,10 @@ bool prepareSolanaAccounts();
 void printSolanaAccounts();
 String vectorToHex(const std::vector<uint8_t>& data);
 String generateHeartbeatPattern(float heartRate);
-void sendHeartRateReading(float heartRate);
+bool sendHeartRateReading(float heartRate);
+void initializeDisplay();
+void displayHeartRate(float heartRate);
+void displayWiFiStatus();
 
 /*****************************************************************************************
 * Function: Initial Setup
@@ -109,8 +123,14 @@ void setup() {
   // initialize heart rate sensor
   pinMode(HEART_RATE_SENSOR_PIN, INPUT);
   
+  // initialize OLED display
+  initializeDisplay();
+  delay(2000);
+  
   // connect to WiFi
   connectToWiFi();
+  displayWiFiStatus();
+  delay(2000);
   
   while (!pdaSuccess && attempt < maxAttempts) {
     pdaSuccess = prepareSolanaAccounts();
@@ -175,6 +195,9 @@ void loop() {
       heartRateCount = 0;
       Serial.print("\r");
     }
+    
+    // Update OLED display with heart rate
+    displayHeartRate(heartRateAverage);
   }
 
   // send heart rate reading
@@ -183,9 +206,10 @@ void loop() {
     digitalWrite(LED_GREEN, HIGH);
     digitalWrite(LED_RED, HIGH);
     digitalWrite(LED_BLUE, LOW);
+    Serial.println("\nTime since last transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
     lastHeartRateSendTime = timeMs;
     sendHeartRateReading(heartRateAverage);
-    Serial.println("\nTime to send transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
+    Serial.println("Time to send transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
   }
 
 }
@@ -406,9 +430,9 @@ String generateHeartbeatPattern(float heartRate) {
 * Parameters: None
 * Returns: bool - True if transaction is successful, false otherwise
 *****************************************************************************************/ 
-void sendHeartRateReading(float heartRate) {
+bool sendHeartRateReading(float heartRate) {
 
-  Serial.println("\n=== Sending Heart Rate Reading ===");
+  Serial.println("\n\n=== Sending Heart Rate Reading ===");
 
   // Prepare instruction
   std::vector<uint8_t> discriminator = solana.calculateDiscriminator("log_heartbeat");
@@ -438,7 +462,7 @@ void sendHeartRateReading(float heartRate) {
     tx.recent_blockhash = solana.getLatestBlockhash();
     if (tx.recent_blockhash.isEmpty()) {
         Serial.println("❌ Failed to get blockhash!");
-        return;
+        return false;
     }
     tx.add(ix);
     tx.sign({signer});
@@ -449,6 +473,97 @@ void sendHeartRateReading(float heartRate) {
         Serial.println("✅ Anchor tx sent! Signature: " + txSig);
     } else {
         Serial.println("❌ Anchor tx failed.");
+        return false;
     }
+    return true;
+}
 
+/*****************************************************************************************
+* Function: Initialize Display
+*
+* Description: Initializes the OLED display with I2C communication
+* Parameters: None
+* Returns: None
+*****************************************************************************************/ 
+void initializeDisplay() {
+  // Initialize I2C
+  Wire.begin(OLED_SDA, OLED_SCL);
+  
+  // Initialize display
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("\n❌ OLED Display initialization failed!\n");
+    return;
+  }
+  
+  // Clear the display buffer
+  display.clearDisplay();
+  
+  // Display welcome message
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("DePIN");
+  display.println("Heartbeat");
+  display.setTextSize(1);
+  display.println("\nInitializing...");
+  display.display();
+  
+  Serial.println("\n✅ OLED Display initialized successfully!\n");
+}
+
+/*****************************************************************************************
+* Function: Display Heart Rate
+*
+* Description: Updates the OLED display with current heart rate data
+* Parameters: heartRate - current heart rate value
+* Returns: None
+*****************************************************************************************/ 
+void displayHeartRate(float heartRate) {
+  display.clearDisplay();
+  
+  // Title
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Heartbeat Monitor");
+  
+  // Heart rate value - large text
+  display.setTextSize(2);
+  display.setCursor(0, 16);
+  display.print((int)heartRate);
+  display.println(" BPM");
+  
+  // Heart pattern
+  display.setTextSize(1);
+  display.setCursor(0, 40);
+  String pattern = generateHeartbeatPattern(heartRate);
+  display.println(pattern);
+  
+  display.display();
+}
+
+/*****************************************************************************************
+* Function: Display WiFi Status
+*
+* Description: Shows WiFi connection status on OLED
+* Parameters: None
+* Returns: None
+*****************************************************************************************/ 
+void displayWiFiStatus() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("WiFi Status");
+  display.println("");
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    display.println("Status: Connected");
+    display.print("IP: ");
+    display.println(WiFi.localIP());
+  } else {
+    display.println("Status: Connecting...");
+  }
+  
+  display.display();
 }

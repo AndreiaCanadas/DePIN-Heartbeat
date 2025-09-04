@@ -1,5 +1,8 @@
-# ❤️  Heart Rate DePIN with ESP32
+# ❤️  Heart Rate Monitor DePIN with ESP32
 ---
+## Project Overview
+This project uses an ESP32 microcontroller connected to a heart rate sensor to monitor real-time heart rate data. The ESP32 reads the sensor values, calculates the average heart rate and periodically sends this data to the Solana blockchain.
+The main goal is to encourage users to stay active and engage in physical exercise by contributing their heart rate data to a decentralized network. In return, users are rewarded with SPL tokens, creating an incentive for healthy habits while supporting a community-driven data ecosystem.
 
 ## ESP32 Architecture
 
