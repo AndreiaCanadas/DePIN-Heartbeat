@@ -16,6 +16,7 @@
 #include "USBCDC.h"
 #include "WString.h"
 #include "esp32-hal-gpio.h"
+#include "esp32-hal.h"
 #include "pins_arduino.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -49,9 +50,11 @@ float heartRateAverage = 0;
 bool heartRateHeaderPrinted = false;
 #define HEART_RATE_TIME_MS 500
 unsigned long lastHeartRateTime = 0;
-#define HEART_RATE_SEND_TIME_MS 60000
+#define HEART_RATE_SEND_TIME_MS 60000 // 1 minute
 unsigned long lastHeartRateSendTime = 0;
+bool heartRateSent = false;
 int heartRateCount = 0;
+bool heartRateDisplay = 0;
 
 // OLED Display Configuration
 #define SCREEN_WIDTH 128
@@ -62,9 +65,11 @@ int heartRateCount = 0;
 #define OLED_SCL A5
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Solana Configuration : see credentials.h
-// Initialize Solana Library
-IoTxChain solana(SOLANA_RPC_URL);
+// Solana Configuration
+IoTxChain solana("https://api.devnet.solana.com");
+
+#define PROGRAM_ID "2hRuCZS1QyXe5N3bYFYvWWRZZqD1t1VwJWjvogfmAM6u"
+#define TOKEN_MINT "4f6b8KjU9QHeEHPczAsF4hL5RZvfWW52C5rw6QkW5XHy"
 Pubkey TOKEN_PROGRAM_ID = Pubkey::fromBase58("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 Pubkey SYSTEM_PROGRAM_ID = Pubkey::fromBase58("11111111111111111111111111111111");
 
@@ -77,10 +82,12 @@ Pubkey accountPdaPubkey;
 Pubkey mintAuthorityPdaPubkey;
 Pubkey tokenAccount;
 String tokenAccountAddress;
-// prepare solana accounts
 const int maxAttempts = 3;
 int attempt = 0;
 bool pdaSuccess = false;
+#define REWARDS_MINT_TIME_MS 600000 // 10 minutes
+unsigned long lastRewardsMintTime = 0;
+bool rewardsMinted = false;
 
 /*****************************************************************************************
 * Function Declarations
@@ -94,9 +101,11 @@ void printSolanaAccounts();
 String vectorToHex(const std::vector<uint8_t>& data);
 String generateHeartbeatPattern(float heartRate);
 bool sendHeartRateReading(float heartRate);
+bool mintRewards();
 void initializeDisplay();
 void displayHeartRate(float heartRate);
 void displayWiFiStatus();
+void displayMessage(String message, int line);
 
 /*****************************************************************************************
 * Function: Initial Setup
@@ -197,19 +206,42 @@ void loop() {
     }
     
     // Update OLED display with heart rate
+    delay(1000);
     displayHeartRate(heartRateAverage);
   }
 
   // send heart rate reading
   if ((timeMs - lastHeartRateSendTime > HEART_RATE_SEND_TIME_MS) && pdaSuccess) {
+    Serial.println("\n\n=== Sending Heart Rate Reading ===");
+    displayMessage("Sending Heart Rate...", 0);
     heartRateHeaderPrinted = false;
     digitalWrite(LED_GREEN, HIGH);
     digitalWrite(LED_RED, HIGH);
     digitalWrite(LED_BLUE, LOW);
     Serial.println("\nTime since last transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
     lastHeartRateSendTime = timeMs;
-    sendHeartRateReading(heartRateAverage);
+    heartRateSent = sendHeartRateReading(heartRateAverage);
     Serial.println("Time to send transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
+    if (heartRateSent) {
+      displayMessage("Tx Sent Successfully!", 2);
+    } else {
+      displayMessage("Failed to send Tx!", 2);
+    }
+  }
+
+  // Mint rewards
+  if (timeMs - lastRewardsMintTime > REWARDS_MINT_TIME_MS) {
+    lastRewardsMintTime = timeMs;
+    digitalWrite(LED_GREEN, HIGH);
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_BLUE, LOW);
+    displayMessage("Minting Rewards...", 0);
+    rewardsMinted = mintRewards();
+    if (rewardsMinted) {
+      displayMessage("Minted Successfully!", 2);
+    } else {
+      displayMessage("Failed to mint!", 2);
+    }
   }
 
 }
@@ -305,7 +337,7 @@ void printSplTokenBalance() {
   if (solana.getSplTokenBalance(PUBLIC_KEY, TOKEN_MINT, rawBalance)) {
       float readableBalance = (float)rawBalance / 1e9;
       Serial.print("Token Balance: ");
-      Serial.println(readableBalance, 8);
+      Serial.println(readableBalance, 9);
   } else {
       Serial.println("Failed to get SPL token balance.");
   }
@@ -391,10 +423,10 @@ String vectorToHex(const std::vector<uint8_t>& data) {
 * Returns: None
 *****************************************************************************************/ 
 void printSolanaAccounts() {
-  Serial.println("\n=== Heartbeat Account PDA ===");
+  Serial.println("\n=== Heartbeat Account PDA (hex) ===");
   Serial.println(vectorToHex(accountPdaPubkey.data));
   
-  Serial.println("\n=== Mint Authority PDA ===");
+  Serial.println("\n=== Mint Authority PDA (hex) ===");
   Serial.println(vectorToHex(mintAuthorityPdaPubkey.data));
   
   Serial.println("\n=== Associated Token Account ===");
@@ -427,12 +459,10 @@ String generateHeartbeatPattern(float heartRate) {
 * Function: Send Heart Rate Reading
 *
 * Description: 
-* Parameters: None
+* Parameters: heartRate - current heart rate reading (float)
 * Returns: bool - True if transaction is successful, false otherwise
 *****************************************************************************************/ 
 bool sendHeartRateReading(float heartRate) {
-
-  Serial.println("\n\n=== Sending Heart Rate Reading ===");
 
   // Prepare instruction
   std::vector<uint8_t> discriminator = solana.calculateDiscriminator("log_heartbeat");
@@ -448,13 +478,58 @@ bool sendHeartRateReading(float heartRate) {
     std::vector<AccountMeta>{
       AccountMeta::signer(owner),
       AccountMeta::writable(accountPdaPubkey, false),
+      AccountMeta{SYSTEM_PROGRAM_ID, false, false}   // System Program
+    },
+    data
+  );
+
+  Transaction tx;
+    tx.fee_payer = owner;
+    tx.recent_blockhash = solana.getLatestBlockhash();
+    if (tx.recent_blockhash.isEmpty()) {
+        Serial.println("❌ Failed to get blockhash!");
+        return false;
+    }
+    tx.add(ix);
+    tx.sign({signer});
+    String txBase64 = tx.serializeBase64();
+
+    String txSig;
+    if (solana.sendRawTransaction(txBase64, txSig)) {
+        Serial.println("✅ Anchor tx sent! Signature: " + txSig);
+    } else {
+        Serial.println("❌ Anchor tx failed.");
+        return false;
+    }
+    return true;
+}
+
+/*****************************************************************************************
+* Function: Mint Rewards
+*
+* Description: 
+* Parameters: None
+* Returns: bool - True if transaction is successful, false otherwise
+*****************************************************************************************/ 
+bool mintRewards() {
+
+  // Prepare instruction
+  std::vector<uint8_t> discriminator = solana.calculateDiscriminator("mint_reward");
+
+  // No payload (data = discriminator)
+
+  Instruction ix(
+    Pubkey{programId},
+    std::vector<AccountMeta>{
+      AccountMeta::signer(owner),
+      AccountMeta::writable(accountPdaPubkey, false),
       AccountMeta{mintAuthorityPdaPubkey, false, false},
       AccountMeta::writable(mint, false),
       AccountMeta::writable(tokenAccount, false),
       AccountMeta{TOKEN_PROGRAM_ID, false, false},   // Token Program
       AccountMeta{SYSTEM_PROGRAM_ID, false, false}   // System Program
     },
-    data
+    discriminator
   );
 
   Transaction tx;
@@ -535,9 +610,18 @@ void displayHeartRate(float heartRate) {
   
   // Heart pattern
   display.setTextSize(1);
-  display.setCursor(0, 40);
-  String pattern = generateHeartbeatPattern(heartRate);
-  display.println(pattern);
+  display.setCursor(30, 40);
+
+  if (!heartRateDisplay) {
+    display.print("__/\\  __");
+    display.setCursor(30, 45);
+    display.print("   \\/");
+    display.display();
+    heartRateDisplay = 1;
+  } else {
+    display.print(" ");
+    heartRateDisplay = 0;
+  }
   
   display.display();
 }
@@ -565,5 +649,27 @@ void displayWiFiStatus() {
     display.println("Status: Connecting...");
   }
   
+  display.display();
+}
+
+/*****************************************************************************************
+* Function: Display Message
+*
+* Description: Displays any string message on the OLED display
+* Parameters: message - string to display on OLED
+* Returns: None
+*****************************************************************************************/ 
+void displayMessage(String message, int line) {
+  if (line < 0) {
+    line = 0;
+  }
+  if (line > 5) {
+    line = 5;
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, line*10);
+  display.println(message);
   display.display();
 }
