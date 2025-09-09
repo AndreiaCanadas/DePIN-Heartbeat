@@ -44,11 +44,22 @@ int ledStatus = LOW;
 
 // Heart Rate Sensor KY039
 #define HEART_RATE_SENSOR_PIN A0
-#define HEART_RATE_SAMPLE_SIZE 20
+#define HEART_RATE_SAMPLE_SIZE 4        // Small rolling average for peak detection
+#define RISE_THRESHOLD 4                // Threshold for detecting rising edge (heartbeat)
+
 float heartRate = 0;
-float heartRateAverage = 0;
+float heartRateReadings[HEART_RATE_SAMPLE_SIZE] = {0};  // Initialize to zero
+float heartRateSum = 0;
 bool heartRateHeaderPrinted = false;
-#define HEART_RATE_TIME_MS 500
+
+// Peak detection variables
+bool rising = false;
+int riseCount = 0;
+float beforeValue = 0;
+unsigned long lastBeatTime = 0;
+float beatIntervals[3] = {1000, 1000, 1000};  // Default to 60 BPM intervals
+
+#define HEART_RATE_UPDATE_TIME_MS 250   // Check for heartbeat every 250ms
 unsigned long lastHeartRateTime = 0;
 #define HEART_RATE_SEND_TIME_MS 60000 // 1 minute
 unsigned long lastHeartRateSendTime = 0;
@@ -82,24 +93,26 @@ Pubkey accountPdaPubkey;
 Pubkey mintAuthorityPdaPubkey;
 Pubkey tokenAccount;
 String tokenAccountAddress;
+
+// Constants
 const int maxAttempts = 3;
 int attempt = 0;
 bool pdaSuccess = false;
 #define REWARDS_MINT_TIME_MS 600000 // 10 minutes
 unsigned long lastRewardsMintTime = 0;
 bool rewardsMinted = false;
+unsigned long lastDisplayMessageTime = 0;
+#define DISPLAY_MESSAGE_TIME_MS 1500
 
 /*****************************************************************************************
 * Function Declarations
 *****************************************************************************************/ 
 void connectToWiFi();
-void blinkRgbLed();
 void readHeartRate();
 void printSplTokenBalance();
 bool prepareSolanaAccounts();
 void printSolanaAccounts();
 String vectorToHex(const std::vector<uint8_t>& data);
-String generateHeartbeatPattern(float heartRate);
 bool sendHeartRateReading(float heartRate);
 bool mintRewards();
 void initializeDisplay();
@@ -173,41 +186,29 @@ void loop() {
   // blink LED
   if (timeMs - lastBlinkTime > BLINK_TIME_MS) {
     lastBlinkTime = timeMs;
-    // Option 1: Simple built-in LED toggle
     ledStatus = !ledStatus;
     digitalWrite(LED_BUILTIN, ledStatus);
-    // Option 2: RGB LED cycling
-    //blinkRgbLed();
   }
 
   // capture heart rate
-  if (timeMs - lastHeartRateTime > HEART_RATE_TIME_MS) {
+  if (timeMs - lastHeartRateTime > HEART_RATE_UPDATE_TIME_MS) {
     digitalWrite(LED_RED, LOW);
     digitalWrite(LED_GREEN, HIGH);
     digitalWrite(LED_BLUE, HIGH);
     lastHeartRateTime = timeMs;
     readHeartRate();
-    heartRateAverage = (heartRateAverage + heartRate) / 2;
     
-    // Print header once
+    // Display heart rate in serial monitor
     if (!heartRateHeaderPrinted) {
       Serial.println("\n== ❤️  Heart Rate Monitor ❤️  ==");
-      Serial.println(); // Blank line after header
       heartRateHeaderPrinted = true;
     }
-
-    // Add current reading with heartbeat pattern
-    String pattern = generateHeartbeatPattern(heartRateAverage);
-    Serial.print(pattern + " ");
-    heartRateCount++;
-    if (heartRateCount >= 6) {  // Show 4 patterns per line for better visibility
-      heartRateCount = 0;
-      Serial.print("\r");
-    }
+    Serial.println("BPM: " + String(heartRate, 1));
     
     // Update OLED display with heart rate
-    delay(1000);
-    displayHeartRate(heartRateAverage);
+    if (timeMs - lastDisplayMessageTime > DISPLAY_MESSAGE_TIME_MS) {
+      displayHeartRate(heartRate);
+    }
   }
 
   // send heart rate reading
@@ -220,29 +221,16 @@ void loop() {
     digitalWrite(LED_BLUE, LOW);
     Serial.println("\nTime since last transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
     lastHeartRateSendTime = timeMs;
-    heartRateSent = sendHeartRateReading(heartRateAverage);
+    heartRateSent = sendHeartRateReading(heartRate);
     Serial.println("Time to send transaction: " + String(millis()-lastHeartRateSendTime) + "ms\n");
     if (heartRateSent) {
       displayMessage("Tx Sent Successfully!", 2);
     } else {
       displayMessage("Failed to send Tx!", 2);
     }
+    lastDisplayMessageTime = millis();
   }
 
-  // Mint rewards
-  if (timeMs - lastRewardsMintTime > REWARDS_MINT_TIME_MS) {
-    lastRewardsMintTime = timeMs;
-    digitalWrite(LED_GREEN, HIGH);
-    digitalWrite(LED_RED, HIGH);
-    digitalWrite(LED_BLUE, LOW);
-    displayMessage("Minting Rewards...", 0);
-    rewardsMinted = mintRewards();
-    if (rewardsMinted) {
-      displayMessage("Minted Successfully!", 2);
-    } else {
-      displayMessage("Failed to mint!", 2);
-    }
-  }
 
 }
 
@@ -309,16 +297,73 @@ void connectToWiFi() {
 /*****************************************************************************************
 * Function: Read Heart Rate
 *
-* Description: Reads the heart rate from the heart rate sensor and calculates the average
+* Description: Detects heartbeats using peak detection and calculates BPM from beat intervals
 * Parameters: None
 * Returns: None
 *****************************************************************************************/ 
 void readHeartRate() {
-  float sum = 0;
-  for (int i = 0; i < HEART_RATE_SAMPLE_SIZE; i++) {
-    sum += analogRead(HEART_RATE_SENSOR_PIN);
+  // Step 1: Take 20ms average reading (eliminates 50Hz electrical noise)
+  float newReading = 0;
+  int readingCount = 0;
+  unsigned long startTime = millis();
+  
+  do {
+    newReading += analogRead(HEART_RATE_SENSOR_PIN);
+    readingCount++;
+  } while (millis() - startTime < 20);
+  
+  newReading /= readingCount;  // Average of all readings in 20ms
+  
+  // Step 2: Update rolling average for smoothing
+  heartRateSum -= heartRateReadings[0];               // Remove oldest
+  heartRateSum += newReading;                         // Add newest
+  
+  // Shift array left
+  for (int i = 0; i < HEART_RATE_SAMPLE_SIZE - 1; i++) {
+    heartRateReadings[i] = heartRateReadings[i + 1];
   }
-  heartRate = sum / HEART_RATE_SAMPLE_SIZE;
+  heartRateReadings[HEART_RATE_SAMPLE_SIZE - 1] = newReading;
+  
+  float currentAverage = heartRateSum / HEART_RATE_SAMPLE_SIZE;
+  
+  // Step 3: Peak Detection (heartbeat detection)
+  if (currentAverage > beforeValue) {
+    // Signal is rising
+    riseCount++;
+    
+    if (!rising && riseCount > RISE_THRESHOLD) {
+      // Detected a heartbeat peak!
+      rising = true;
+      
+      unsigned long currentTime = millis();
+      unsigned long beatInterval = currentTime - lastBeatTime;
+      
+      // Only process if interval is realistic (30-200 BPM = 300-2000ms) and not first beat
+      if (lastBeatTime > 0 && beatInterval > 300 && beatInterval < 2000) {
+        // Update beat intervals (shift array)
+        beatIntervals[2] = beatIntervals[1];
+        beatIntervals[1] = beatIntervals[0];
+        beatIntervals[0] = beatInterval;
+        
+        // Calculate BPM using weighted average of last 3 beats
+        float weightedInterval = (0.4 * beatIntervals[0]) + 
+                                (0.3 * beatIntervals[1]) + 
+                                (0.3 * beatIntervals[2]);
+        
+        heartRate = 60000.0 / weightedInterval;  // Convert ms to BPM
+        
+        // Constrain to realistic range
+        heartRate = constrain(heartRate, 30, 200);
+      }
+      lastBeatTime = currentTime;
+    }
+  } else {
+    // Signal is falling - reset rise detection
+    rising = false;
+    riseCount = 0;
+  }
+  
+  beforeValue = currentAverage;
 }
 
 
@@ -433,27 +478,6 @@ void printSolanaAccounts() {
   Serial.println(tokenAccountAddress);
 }
 
-/*****************************************************************************************
-* Function: Generate Heartbeat Pattern
-*
-* Description: Creates visual heartbeat pattern based on heart rate value
-* Parameters: heartRate - current heart rate reading
-* Returns: String - visual pattern representing heartbeat intensity
-*****************************************************************************************/ 
-String generateHeartbeatPattern(float heartRate) {
-  int bpm = (int)heartRate;
-  
-  // Different patterns based on heart rate ranges
-  if (heartRate < 70) {
-    return String(bpm) + " __/\\^/\\__";
-  } else if (heartRate < 100) {
-    return String(bpm) + " _/\\^^/\\_";
-  } else if (heartRate < 130) {
-    return String(bpm) + " /\\^^^^\\/\\";
-  } else {
-    return String(bpm) + " /\\^^^^^/\\";
-  }
-}
 
 /*****************************************************************************************
 * Function: Send Heart Rate Reading
@@ -577,8 +601,8 @@ void initializeDisplay() {
   display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
-  display.println("DePIN");
   display.println("Heartbeat");
+  display.println("Monitor");
   display.setTextSize(1);
   display.println("\nInitializing...");
   display.display();
@@ -610,11 +634,11 @@ void displayHeartRate(float heartRate) {
   
   // Heart pattern
   display.setTextSize(1);
-  display.setCursor(30, 40);
+  display.setCursor(40, 40);
 
   if (!heartRateDisplay) {
-    display.print("__/\\  __");
-    display.setCursor(30, 45);
+    display.print("_/\\  _");
+    display.setCursor(39, 45);
     display.print("   \\/");
     display.display();
     heartRateDisplay = 1;
