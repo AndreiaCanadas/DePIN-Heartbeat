@@ -1,121 +1,105 @@
-# ❤️  Heart Rate Monitor DePIN with ESP32
----
-## Project Overview
-This project uses an ESP32 microcontroller connected to a heart rate sensor to monitor real-time heart rate data. The ESP32 reads the sensor values, calculates the average heart rate and periodically sends this data to the Solana blockchain.
-The main goal is to encourage users to stay active and engage in physical exercise by contributing their heart rate data to a decentralized network. In return, users are rewarded with SPL tokens, creating an incentive for healthy habits while supporting a community-driven data ecosystem.
+# Solana DePIN - Heartbeat Monitor
 
-## ESP32 Architecture
+## System Overview
+
+This project consists of three integrated components that create a decentralized physical infrastructure network (DePIN) for health monitoring and token rewards:
+
+### System Components
+1. **ESP32 Microcontroller** - Physical device with heart rate sensor and OLED display
+2. **Solana Protocol** - On-chain program for data storage and reward calculation  
+3. **Webpage** - User interface for account management and reward minting
+
+### User Journey
+1. User connects wallet and creates account from webpage
+2. On-chain HeartBeat account is initialized with user's wallet address
+3. User starts ESP32 device to begin heart rate monitoring
+4. ESP32 sends heart rate data to Solana protocol every minute
+5. Protocol calculates points based on heart rate above threshold (currently set to 100 BPM)
+6. User views monitoring data and mints SPL token rewards on webpage
+
+### Data Flow
+- **ESP32 → Solana**: Heart rate readings (every 60 seconds)
+- **Solana Protocol**: Stores data in circular buffer, calculates points, manages rewards
+- **Webpage ← Solana**: Fetches user data and points for display
+- **Webpage → Solana**: Allows user to mints SPL tokens based on accumulated points
+
+---
+## ESP32 Component
+
+This repository contains the ESP32 firmware that monitors heart rate and communicates with the Solana protocol.
 
 ### Hardware Requirements
-- ESP32
-- Heart rate sensor (KY039 or other similar)
+- ESP32 microcontroller
+- KY-039 heart rate sensor (analog output)
+- 128x64 OLED display (I2C, SDA=A4, SCL=A5)
 - WiFi connectivity
 
-### ESP32 Functionality
-1. Initialize sensor and WiFi
-2. Calibrate baseline heart rate (60 seconds)
-3. Main loop:
-   - Read heart rate every 20 ms (BPM)
-   - Calculate average (BPM)
-   - Every 1 minute: prepare transaction
-   - Sign data with device private key
-   - Send to devnet
+### Core Functionality
+1. **Initialization**
+   - Initialize OLED display and heart rate sensor
+   - Connect to WiFi network
+   - Establish Solana connection and finds user's HeartBeat account
 
-### Validations and considerations:
-Sanity checks: HR between 40-220 BPM
-Variability check: Real hearts have natural variation
+2. **Heart Rate Monitoring**
+   - Continuous 20ms sampling to eliminate electrical noise
+   - Peak detection algorithm using rising edge threshold
+   - BPM calculation from beat intervals (weighted average of last 3 beats)
+   - Real-time display on OLED screen
 
----
-## Solana Protocol Architecture
+3. **Data Transmission**
+   - Send heart rate data to Solana protocol every 60 seconds
+   - Display transaction status on OLED
+   - Handle network errors and retry logic
 
-1. Initialize Account
-2. Log Heartbeat
-    - Anti-spam rate limiting (max 1 submission per minute per device)
-    - Log data in circular buffer
-    - Calculate average rate
-    - Reward user with SPL tokens every x minutes if average from last readings are above threshold
+### Heart Rate Detection Algorithm
+- **Noise Elimination**: 20ms continuous sampling removes 50Hz electrical interference
+- **Signal Smoothing**: 4-sample rolling average for stable readings
+- **Peak Detection**: Detects heartbeat peaks using 4 consecutive rising values threshold
+- **BPM Calculation**: Time intervals between peaks converted to beats per minute
+- **Range Validation**: Accepts only realistic heart rates (30-200 BPM)
+- **Stability**: Weighted average of last 3 beat intervals for consistent readings
 
-State account: 
-
-```rust
-pub struct HeartBeat {
-    pub owner: Pubkey,
-    pub heartbeat: [u32; NUMBER_OF_READINGS],   // circular buffer with most recent at index 0
-    pub last_heartbeat: i64,
-    pub last_minted: i64,
-    pub bump: u8,
-}
-```
-
-### Solana Protocol Functionality
-
-Main logging functionality:
-```rust
-pub fn log_heartbeat(ctx: Context<LogHeartBeat>, reading: u32) -> Result<()> {
-    ctx.accounts.log_heartbeat(reading)?;
-    let average = ctx.accounts.get_average_heartbeat()?;
-    if average > HEARTBEAT_THRESHOLD {
-        if Clock::get()?.unix_timestamp - ctx.accounts.heartbeat.last_minted > MINT_TIME {
-            ctx.accounts.mint_reward(average, &ctx.bumps)?;
-        }
-    }
-    Ok(())
-}
-```
-
-Logging Instructions:
-```rust
-impl<'info> LogHeartBeat<'info> {
-    pub fn log_heartbeat(&mut self, reading: u32) -> Result<()> {
-
-        // allow only 1 reading per minute
-        require!(
-            Clock::get()?.unix_timestamp - self.heartbeat.last_heartbeat > 60, 
-            CustomError::HeartbeatPerMinute
-        );
-
-        self.heartbeat.last_heartbeat = Clock::get()?.unix_timestamp;
-
-        // Shift all values to the right and insert the new reading at index 0 (circular buffer style)
-        for i in (1..NUMBER_OF_READINGS).rev() {
-            self.heartbeat.heartbeat[i] = self.heartbeat.heartbeat[i - 1];
-        }
-        self.heartbeat.heartbeat[0] = reading;
-
-        Ok(())
-    }
-
-    pub fn get_average_heartbeat(&mut self) -> Result<u32> {
-        let sum: u32 = self.heartbeat.heartbeat.iter().sum();
-        let average = sum / NUMBER_OF_READINGS as u32;
-        Ok(average)
-    }
-
-    pub fn mint_reward(&mut self, average: u32, bumps: &LogHeartBeatBumps) -> Result<()> {
-        // mint rewards if time interval has elapsed
-        require!(
-            Clock::get()?.unix_timestamp - self.heartbeat.last_minted > MINT_TIME, 
-            CustomError::MintingTimeIntervalNotElapsed
-        );
-        self.heartbeat.last_minted = Clock::get()?.unix_timestamp;
-            
-        let signer_seeds: &[&[&[u8]]] = &[&[b"authority", &[bumps.authority]]];
-
-        let cpi_accounts = MintTo {
-            mint: self.mint.to_account_info(),
-            to: self.token_account.to_account_info(),
-            authority: self.authority.to_account_info(),
-        };
-        let cpi_ctx = CpiContext::new_with_signer(self.token_program.to_account_info(), cpi_accounts, signer_seeds);
-        mint_to(cpi_ctx, average as u64)?;
-
-        Ok(())
-    }
-}
-```
+### Display System
+- **Startup**: WiFi connection status and system initialization
+- **Monitoring**: Real-time heart rate display with visual heartbeat pattern
+- **Transactions**: Status messages for data transmission to blockchain
 
 ---
-## Scaling and final considerations:
-- Sustainable token emission
-- Update account to save points and separate method to claim rewards
-- Partnerships for token utility
+## Solana Protocol
+
+The on-chain program manages user data and reward calculations:
+
+### Account Structure
+- **HeartBeat Account**: Stores user's wallet address, heart rate history, points, and timestamps
+- **Circular Buffer**: Maintains last 10 heart rate readings for point calculation
+- **Points System**: Accumulates points when heart rate stays above 100 BPM threshold
+
+### Key Instructions
+1. **Initialize**: Create new HeartBeat account for user
+2. **Log Heartbeat**: Store heart rate reading (rate limited to once per minute)
+3. **Mint Rewards**: Convert accumulated points to SPL tokens (every 10 minutes)
+
+### Reward Logic
+- Points earned when heart rate readings stay above 100 BPM threshold
+- Point value = average heart rate of last 10 readings
+- SPL tokens minted based on accumulated points
+- Rate limiting prevents spam and ensures fair distribution
+
+**Repository**: https://github.com/AndreiaCanadas/anchor-heart-beat
+
+## Webpage
+
+User interface for account management and reward minting:
+
+### Features
+- Wallet connection and account initialization
+- Real-time heart rate monitoring dashboard
+- Points balance and reward history
+- SPL token minting interface
+
+**Repository**: https://github.com/AndreiaCanadas/heartbeat-monitor-dashboard
+
+## Future Considerations
+- Off-chain data logging for improved scalability
+- Sustainable token emission model
+- Integration with fitness tracking platforms
