@@ -2,14 +2,15 @@
 
 ## System Overview
 
-This project consists of three integrated components that create a decentralized physical infrastructure network (DePIN) for health monitoring and token rewards:
+This project consists of a DePIN protocol to monitor health and wellness.
+Initial idea is for users to contribute with heartbeat data that is stored on-chain and receive rewards based on consecutive time heart rate is above a certain threshold (100 bpm).
 
-### System Components
-1. **ESP32 Microcontroller** - Physical device with heart rate sensor and OLED display
-2. **Solana Protocol** - On-chain program for data storage and reward calculation  
-3. **Webpage** - User interface for account management and reward minting
+### System
+1. **Device** - Physical device with heart rate sensor (currently is an ESP32 Microcontroller with Wifi connectivity, connected to a KY-039 sensor and OLED display)
+2. **Solana Protocol** - On-chain program that allow users to initialize account, log data and mint rewards. 
+3. **Frontend/Dashboard** - User interface for account management and minting rewards
 
-### User Journey
+### User Interaction
 1. User connects wallet and creates account from webpage
 2. On-chain HeartBeat account is initialized with user's wallet address
 3. User starts ESP32 device to begin heart rate monitoring
@@ -67,23 +68,22 @@ This repository contains the ESP32 firmware that monitors heart rate and communi
 ---
 ## Solana Protocol
 
-The on-chain program manages user data and reward calculations:
+The on-chain program manages user data and allows users to mint rewards:
 
 ### Account Structure
 - **HeartBeat Account**: Stores user's wallet address, heart rate history, points, and timestamps
-- **Circular Buffer**: Maintains last 10 heart rate readings for point calculation
-- **Points System**: Accumulates points when heart rate stays above 100 BPM threshold
+- **Circular Buffer**: Maintains last 10 heart rate readings
+- **Points System**: Accumulates points when heart rate stays above 100 BPM threshold for a consecutive period of time
 
 ### Key Instructions
 1. **Initialize**: Create new HeartBeat account for user
 2. **Log Heartbeat**: Store heart rate reading (rate limited to once per minute)
-3. **Mint Rewards**: Convert accumulated points to SPL tokens (every 10 minutes)
+3. **Mint Rewards**: Convert accumulated points to SPL tokens
 
 ### Reward Logic
-- Points earned when heart rate readings stay above 100 BPM threshold
-- Point value = average heart rate of last 10 readings
+- Points earned when heart rate readings stay above 100 BPM threshold for x consecutive readings
+- Point value = average heart rate of last x readings
 - SPL tokens minted based on accumulated points
-- Rate limiting prevents spam and ensures fair distribution
 
 **Repository**: https://github.com/AndreiaCanadas/anchor-heart-beat
 
@@ -103,3 +103,4 @@ User interface for account management and reward minting:
 - Off-chain data logging for improved scalability
 - Sustainable token emission model
 - Integration with fitness tracking platforms
+- Process data to get statistics and wellness data
